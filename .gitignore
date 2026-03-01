@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+uploads/
+.DS_Store
+*.mp4
+*.mp3
+*.wav
+*.json
+!requirements.txt
+.env
+sql_app.db
+.idea/
