@@ -11,6 +11,7 @@ uploads/
 *.wav
 *.json
 !requirements.txt
+!railway.json
 .env
 sql_app.db
 .idea/
