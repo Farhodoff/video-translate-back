@@ -13,10 +13,13 @@ app = FastAPI(title="Video Translate API", version="1.0.0")
 
 # CORS — frontend domenlarini ruxsat berish
 origins = [
-    "http://localhost:5173",        # Vite dev server
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:5174",
     "http://localhost:3000",
-    "https://video-translate-front.vercel.app",  # Production Vercel
-    os.getenv("FRONTEND_URL", ""),  # .env dan ham o'qish mumkin
+    "https://video-translate-front.vercel.app",
+    os.getenv("FRONTEND_URL", ""),
 ]
 
 app.add_middleware(

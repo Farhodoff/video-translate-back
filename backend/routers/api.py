@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Form, UploadFile, File, WebSocket, WebSocketDisconnect, Depends, BackgroundTasks
+from typing import Optional
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from datetime import timedelta
@@ -21,25 +22,26 @@ UPLOAD_DIR = "uploads"
 
 # ─── Background task ─────────────────────────────────────────────────────────
 
-async def process_project_video(project_id: int, url: str, db: Session):
+async def process_project_video(project_id: int, db: Session, url: Optional[str] = None, file_path: Optional[str] = None):
     try:
         project = db.query(models.Project).filter(models.Project.id == project_id).first()
         if not project:
             return
 
-        info = video_service.analyze_youtube_url(url)
-        project.thumbnail = info.get("thumbnail")
-        project.title = info.get("video_title") if not project.title else project.title
-        db.commit()
+        output_path = file_path
+        if url:
+            info = video_service.analyze_youtube_url(url)
+            project.thumbnail = info.get("thumbnail")
+            project.title = info.get("video_title") if not project.title else project.title
+            db.commit()
 
-        filename = f"{project_id}_{int(time.time())}.mp4"
-        output_path = video_service.download_video(url, UPLOAD_DIR, filename)
+            filename = f"{project_id}_{int(time.time())}.mp4"
+            output_path = video_service.download_video(url, UPLOAD_DIR, filename)
 
-        project.video_url = f"/uploads/{os.path.basename(output_path)}"
-        project.status = "Transcribing"
-        db.commit()
+        if not output_path:
+            return
 
-        transcript = transcription_service.transcribe_video(output_path, quality=project.quality)
+        transcript = transcription_service.transcribe_video(str(output_path), quality=project.quality)
         project.transcript = transcript
 
         project.status = "Translating"
@@ -51,13 +53,13 @@ async def process_project_video(project_id: int, url: str, db: Session):
         project.status = "Dubbing"
         db.commit()
 
-        output_dir = os.path.dirname(output_path)
+        output_dir = os.path.dirname(str(output_path))
         audio_path = await dubbing_service.create_dubbing(project_id, translated_segments, output_dir)
         project.dubbed_audio_url = f"/uploads/{os.path.basename(audio_path)}"
 
         final_video_filename = f"final_{project_id}.mp4"
         final_video_path = os.path.join(output_dir, final_video_filename)
-        dubbing_service.merge_video_audio(output_path, audio_path, final_video_path)
+        dubbing_service.merge_video_audio(str(output_path), audio_path, final_video_path)
         project.final_video_url = f"/uploads/{final_video_filename}"
 
         project.status = "Ready"
@@ -142,15 +144,19 @@ async def health_check():
 @router.post("/projects")
 async def create_project(
     background_tasks: BackgroundTasks,
-    youtube_url: str = Form(...),
+    youtube_url: str = Form(None),
+    file: UploadFile = File(None),
     title: str = Form(None),
     quality: str = Form("standard"),
     user: models.User = Depends(auth.get_current_user),
     db: Session = Depends(database.get_db)
 ):
+    if not youtube_url and not file:
+        return JSONResponse(status_code=400, content={"status": "error", "message": "Video havolasi yoki fayl yuklang"})
+
     new_project = models.Project(
         user_id=user.id,
-        title=title or "New Project",
+        title=title or ("Video Project" if not file else file.filename),
         status="Processing",
         quality=quality,
         video_url=None,
@@ -159,7 +165,16 @@ async def create_project(
     db.add(new_project)
     db.commit()
     db.refresh(new_project)
-    background_tasks.add_task(process_project_video, new_project.id, youtube_url, db)
+
+    file_path = None
+    if file:
+        os.makedirs(UPLOAD_DIR, exist_ok=True)
+        file_path = os.path.join(UPLOAD_DIR, f"{new_project.id}_{file.filename}")
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+    background_tasks.add_task(process_project_video, new_project.id, db, url=youtube_url, file_path=file_path)
+
     return JSONResponse(content={
         "status": "success",
         "data": {"id": new_project.id, "title": new_project.title, "status": new_project.status}
@@ -269,52 +284,58 @@ async def generate_audio(
 # ─── Project CRUD ─────────────────────────────────────────────────────────────
 
 @router.get("/project/{project_id}")
-async def get_project(project_id: str):
-    video_filename = None
-    for ext in ['.mp4', '.mov', '.avi', '.webm']:
-        if os.path.exists(os.path.join(UPLOAD_DIR, project_id + ext)):
-            video_filename = project_id + ext
-            break
-    if not video_filename:
-        return JSONResponse(content={"status": "error", "message": "Video topilmadi"}, status_code=404)
-    transcript_path = os.path.join(UPLOAD_DIR, project_id + ".json")
+async def get_project(project_id: int, db: Session = Depends(database.get_db)):
+    project = db.query(models.Project).filter(models.Project.id == project_id).first()
+    if not project:
+        return JSONResponse(status_code=404, content={"status": "error", "message": "Loyiha topilmadi"})
+
     segments = []
-    if os.path.exists(transcript_path):
-        with open(transcript_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            raw = data.get('segments', []) if isinstance(data, dict) else data
-            segments = [{"start": s['start'], "end": s['end'], "text": s['text'], "translated": s.get('translated')} for s in raw]
+    if project.transcript:
+        raw = project.transcript.get('segments', []) if isinstance(project.transcript, dict) else project.transcript
+    elif project.translated_transcript:
+        raw = project.translated_transcript
+    else:
+        raw = []
+
+    segments = [{"start": s['start'], "end": s['end'], "text": s['text'], "translated": s.get('translated_text') or s.get('translated')} for s in raw]
+
     return JSONResponse(content={
         "status": "success",
-        "data": {"project_id": project_id, "video_url": f"/uploads/{video_filename}", "segments": segments}
+        "data": {
+            "project_id": project.id,
+            "video_url": project.video_url,
+            "segments": segments,
+            "status": project.status,
+            "title": project.title
+        }
     })
 
 
 @router.put("/project/{project_id}")
-async def update_project(project_id: str, request: ProjectUpdateRequest):
+async def update_project(project_id: int, request: ProjectUpdateRequest, db: Session = Depends(database.get_db)):
     try:
-        json_path = os.path.join(UPLOAD_DIR, f"{project_id}.json")
-        if not os.path.exists(json_path):
-            return JSONResponse(content={"status": "error", "message": "Project topilmadi"}, status_code=404)
-        new_segments = [s.dict() for s in request.segments]
-        with open(json_path, 'w', encoding='utf-8') as f:
-            json.dump({"segments": new_segments}, f, ensure_ascii=False, indent=4)
+        project = db.query(models.Project).filter(models.Project.id == project_id).first()
+        if not project:
+            return JSONResponse(status_code=404, content={"status": "error", "message": "Loyiha topilmadi"})
+        
+        # Save to database
+        project.transcript = {"segments": [s.dict() for s in request.segments]}
+        db.commit()
+        
         return JSONResponse(content={"status": "success", "message": "Project yangilandi"})
     except Exception as e:
         return JSONResponse(content={"status": "error", "message": str(e)}, status_code=500)
 
 
 @router.delete("/project/{project_id}")
-async def delete_project(project_id: str):
+async def delete_project(project_id: int, db: Session = Depends(database.get_db)):
     try:
-        json_path = os.path.join(UPLOAD_DIR, f"{project_id}.json")
-        if os.path.exists(json_path):
-            os.remove(json_path)
-        for ext in ['.mp4', '.mov', '.avi', '.webm']:
-            video_path = os.path.join(UPLOAD_DIR, project_id + ext)
-            if os.path.exists(video_path):
-                os.remove(video_path)
-                break
+        project = db.query(models.Project).filter(models.Project.id == project_id).first()
+        if not project:
+            return JSONResponse(status_code=404, content={"status": "error", "message": "Loyiha topilmadi"})
+        
+        db.delete(project)
+        db.commit()
         return JSONResponse(content={"status": "success", "message": "Project o'chirildi"})
     except Exception as e:
         return JSONResponse(content={"status": "error", "message": str(e)}, status_code=500)
@@ -323,7 +344,7 @@ async def delete_project(project_id: str):
 # ─── Meeting Notes ────────────────────────────────────────────────────────────
 
 @router.post("/project/{project_id}/notes")
-async def generate_notes(project_id: str):
+async def generate_notes(project_id: int):
     try:
         json_path = os.path.join(UPLOAD_DIR, f"{project_id}.json")
         if not os.path.exists(json_path):
@@ -346,7 +367,7 @@ async def generate_notes(project_id: str):
 
 
 @router.get("/project/{project_id}/notes")
-async def get_notes(project_id: str):
+async def get_notes(project_id: int):
     notes_path = os.path.join(UPLOAD_DIR, f"notes_{project_id}.json")
     if os.path.exists(notes_path):
         with open(notes_path, "r", encoding='utf-8') as f:
@@ -358,19 +379,20 @@ async def get_notes(project_id: str):
 # ─── WebSocket Export ─────────────────────────────────────────────────────────
 
 @router.websocket("/ws/export/{project_id}")
-async def export_websocket(websocket: WebSocket, project_id: str):
+async def export_websocket(websocket: WebSocket, project_id: int):
     await websocket.accept()
     try:
         video_filename = None
         for ext in ['.mp4', '.mov', '.avi', '.webm']:
-            if os.path.exists(os.path.join(UPLOAD_DIR, project_id + ext)):
-                video_filename = project_id + ext
+            if os.path.exists(os.path.join(UPLOAD_DIR, str(project_id) + ext)):
+                video_filename = str(project_id) + ext
                 break
         if not video_filename:
             await websocket.send_json({"status": "error", "message": "Video topilmadi"})
             await websocket.close()
             return
-        video_path = os.path.join(UPLOAD_DIR, video_filename)
+        
+        video_path = os.path.join(UPLOAD_DIR, str(video_filename))
         json_path = os.path.join(UPLOAD_DIR, f"{project_id}.json")
         if not os.path.exists(json_path):
             await websocket.send_json({"status": "error", "message": "Transcript topilmadi"})
