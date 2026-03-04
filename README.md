@@ -1,49 +1,53 @@
-# 🎙️ Video Translate — AI Dubbing Backend
+# 🎙️ AI Dub Studio — Backend
 
-FastAPI va Ilg'or AI modellari (WhisperX, XTTS v2, Wav2Lip) asosida qurilgan avtomatlashtirilgan video dublyaj platformasining backend tizimi.
+[![FastAPI](https://img.shields.io/badge/FastAPI-005571?style=for-the-badge&logo=fastapi)](https://fastapi.tiangolo.com/)
+[![Python](https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
+[![Redis](https://img.shields.io/badge/redis-%23DD0031.svg?style=for-the-badge&logo=redis&logoColor=white)](https://redis.io/)
+[![Celery](https://img.shields.io/badge/celery-%23a9cc33.svg?style=for-the-badge&logo=celery&logoColor=ddf4a4)](https://docs.celeryq.dev/)
 
----
-
-## ✨ Imkoniyatlar
-
-- **🎧 Precise Transcription**: `WhisperX` yordamida so'zlarni vaqtiga (alignment) aniq tushirish.
-- **🗣️ Voice Cloning**: `Coqui XTTS v2` yordamida foydalanuvchi ovozini 10 soniyalik namunadan klonlash.
-- **👄 Lip-Sync**: `Wav2Lip` algoritmi orqali videodagi lab harakatlarini yangi audyoga moslashtirish.
-- **🎵 Audio Mixing**: `Demucs` yordamida fon musiqasini ovozdan ajratib olish va qayta birlashtirish.
-- **🚀 Scalable Architecture**: `Celery` + `Redis` orqali og'ir AI vazifalarni fon rejimida navbat bilan qayta ishlash.
-- **📡 Real-time Progress**: `WebSockets` yordamida foydalanuvchiga videoni qayta ishlash foizini jonli ko'rsatish.
+FastAPI va sun'iy intellekt modellari asosida qurilgan avtomatlashtirilgan video dublyaj platformasining backend tizimi.
 
 ---
 
-## 🛠 Texnologiyalar
+## ✨ Asosiy Imkoniyatlar
 
-- **Core**: FastAPI, SQLAlchemy (SQLite/PostgreSQL)
-- **AI Models**: 
+- **🎧 Aniq Transkripsiya**: `WhisperX` yordamida nutqni matnga vaqt belgi (timestamps) bilan aylantirish.
+- **🗣️ Voice Cloning**: `XTTS v2` yordamida kishi ovozini yuqori aniqlikda klonlash.
+- **👄 Lip-Sync**: `Wav2Lip` algoritmi orqali videodagi lab harakatlarini yangi audyoga sinxronlash.
+- **🎵 Fon Musiqasini Saqlash**: `Demucs` yordamida original musiqani inson nutqidan ajratib olish va qayta birlashtirish.
+- **🚀 Scalable Task Queue**: `Celery` + `Redis` yordamida og'ir vazifalarni samarali taqsimlash.
+- **📡 WebSocket Progress**: Videoga ishlov berish bosqichlarini real-vaqtda foydalanuvchiga uzatish.
+
+---
+
+## 🛠 Texnologik Stack
+
+- **Asos**: [FastAPI](https://fastapi.tiangolo.com/) + [SQLAlchemy](https://www.sqlalchemy.org/)
+- **AI Modellar**: 
   - `WhisperX` (Speech-to-Text)
-  - `Coqui TTS / XTTS v2` (Voice Cloning)
-  - `Wav2Lip` (Lip-Syncing)
-  - `Demucs` (Vocal/Music Separation)
-- **Queue**: Celery, Redis
-- **Media**: FFmpeg, Pydub, OpenCV
+  - `Coqui XTTS v2` (Voice Cloning)
+  - `Wav2Lip` (Visual Sync)
+- **Navbat tizimi**: [Celery](https://docs.celeryq.dev/) & [Redis](https://redis.io/)
+- **Media**: `FFmpeg`, `Pydub`, `OpenCV`
 
 ---
 
 ## 🚀 Ishga tushirish (Local)
 
-### 1. Muhitni sozlash
+### 1. Vertual muhitni sozlash
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 2. Redis-ni ishga tushiring
+### 2. Redis-ni yoqing
 ```bash
 brew install redis # Mac uchun
-redis-server
+brew services start redis
 ```
 
-### 3. Celery Worker (AI JARAYONLARI UCHUN)
+### 3. Celery Worker (AI JARAYONLAR UCHUN)
 ```bash
 export PYTHONPATH=$(pwd)
 celery -A backend.celery_app worker --loglevel=info
@@ -54,22 +58,25 @@ celery -A backend.celery_app worker --loglevel=info
 uvicorn backend.main:app --reload --port 8000
 ```
 
-API docs: **[http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)**
-
 ---
 
-## 📋 API Xaritasi
+## 📋 API Rejasi
 
-| Method | URL | Tavsif |
-|--------|-----|--------|
-| `POST` | `/api/projects` | Video yuklash (URL/Fayl) va ishlovni boshlash |
-| `GET` | `/api/project/{id}` | Loyiha ma'lumotlari va segmentlarni olish |
-| `WS` | `/api/ws/project/{id}` | Jonli progress (WebSocket) |
-| `POST` | `/api/clone-voice` | Ovozni namunadan klonlash |
-| `POST` | `/api/analyze-url` | YouTube URL ma'lumotlarini olish |
+| Method | URL | Vazifasi |
+|--------|-----|----------|
+| `POST` | `/api/projects` | Loyiha yaratish (YouTube URL yoki Fayl) |
+| `GET` | `/api/project/{id}` | Loyiha tafsilotlari va segmentlar |
+| `WS` | `/api/ws/project/{id}` | Real-vaqt progressi (WebSocket) |
+| `POST` | `/api/analyze-url` | YouTube linkidan ma'lumot olish |
 
 ---
 
 ## 👤 Muallif
 
-[Farhodoff](https://github.com/Farhodoff)
+**[Farhodoff](https://github.com/Farhodoff)**
+
+---
+
+## 📜 Litsenziya
+
+MIT License.
