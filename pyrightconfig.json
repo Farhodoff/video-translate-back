@@ -1,0 +1,9 @@
+{
+  "venvPath": ".",
+  "venv": ".venv",
+  "pythonVersion": "3.10",
+  "include": ["backend"],
+  "exclude": ["backend/third_party"],
+  "reportMissingImports": false,
+  "reportMissingModuleSource": "none"
+}

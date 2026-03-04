@@ -20,6 +20,7 @@ class Project(Base):
     user_id = Column(Integer, ForeignKey("users.id"))
     title = Column(String, index=True)
     status = Column(String, default="Ready") # Ready, Processing, Completed
+    progress = Column(Integer, default=0) # 0-100 percentage
     video_url = Column(String, nullable=True)
     thumbnail = Column(String, nullable=True)
     error_message = Column(String, nullable=True) # For handling failed downloads

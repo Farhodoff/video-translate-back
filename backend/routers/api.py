@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Form, UploadFile, File, WebSocket, WebSocketDisconnect, Depends, BackgroundTasks
+from fastapi import APIRouter, Form, UploadFile, File, WebSocket, WebSocketDisconnect, Depends
 from typing import Optional
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
@@ -12,6 +12,8 @@ import uuid
 import json
 import time
 import traceback
+import asyncio
+import redis
 from backend.services import video_service, transcription_service, translation_service, tts_service, dubbing_service, notes_service
 from backend.utils.text_normalizer import normalize_text
 from backend.models.schemas import TranslationRequest, ProjectUpdateRequest
@@ -20,55 +22,7 @@ router = APIRouter(prefix="/api")
 UPLOAD_DIR = "uploads"
 
 
-# ─── Background task ─────────────────────────────────────────────────────────
-
-async def process_project_video(project_id: int, db: Session, url: Optional[str] = None, file_path: Optional[str] = None):
-    try:
-        project = db.query(models.Project).filter(models.Project.id == project_id).first()
-        if not project:
-            return
-
-        output_path = file_path
-        if url:
-            info = video_service.analyze_youtube_url(url)
-            project.thumbnail = info.get("thumbnail")
-            project.title = info.get("video_title") if not project.title else project.title
-            db.commit()
-
-            filename = f"{project_id}_{int(time.time())}.mp4"
-            output_path = video_service.download_video(url, UPLOAD_DIR, filename)
-
-        if not output_path:
-            return
-
-        transcript = transcription_service.transcribe_video(str(output_path), quality=project.quality)
-        project.transcript = transcript
-
-        project.status = "Translating"
-        db.commit()
-
-        translated_segments = translation_service.translate_segments(transcript, target_lang='uz')
-        project.translated_transcript = translated_segments
-
-        project.status = "Dubbing"
-        db.commit()
-
-        output_dir = os.path.dirname(str(output_path))
-        audio_path = await dubbing_service.create_dubbing(project_id, translated_segments, output_dir)
-        project.dubbed_audio_url = f"/uploads/{os.path.basename(audio_path)}"
-
-        final_video_filename = f"final_{project_id}.mp4"
-        final_video_path = os.path.join(output_dir, final_video_filename)
-        dubbing_service.merge_video_audio(str(output_path), audio_path, final_video_path)
-        project.final_video_url = f"/uploads/{final_video_filename}"
-
-        project.status = "Ready"
-        db.commit()
-    except Exception as e:
-        print(f"Error processing project {project_id}: {e}")
-        project.status = "Error"
-        project.error_message = str(e)
-        db.commit()
+from backend.tasks import process_project_video_task
 
 
 # ─── Auth endpoints ───────────────────────────────────────────────────────────
@@ -143,7 +97,6 @@ async def health_check():
 
 @router.post("/projects")
 async def create_project(
-    background_tasks: BackgroundTasks,
     youtube_url: str = Form(None),
     file: UploadFile = File(None),
     title: str = Form(None),
@@ -173,7 +126,8 @@ async def create_project(
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-    background_tasks.add_task(process_project_video, new_project.id, db, url=youtube_url, file_path=file_path)
+    # Delay the task via Celery Queue asynchronously
+    process_project_video_task.delay(new_project.id, url=youtube_url, file_path=file_path)
 
     return JSONResponse(content={
         "status": "success",
@@ -205,6 +159,58 @@ async def list_projects(
             for p in projects
         ]
     })
+
+
+
+
+@router.websocket("/ws/project/{project_id}")
+async def websocket_project_status(websocket: WebSocket, project_id: int, db: Session = Depends(database.get_db)):
+    await websocket.accept()
+    
+    # 1. Send immediate current status from DB
+    project = db.query(models.Project).filter(models.Project.id == project_id).first()
+    if project:
+        await websocket.send_json({
+            "status": project.status,
+            "progress": project.progress
+        })
+    else:
+        await websocket.send_json({"error": "Project not found"})
+        await websocket.close()
+        return
+
+    # 2. Subscribe to Redis for real-time updates
+    REDIS_URL = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
+    try:
+        redis_client = redis.from_url(REDIS_URL)
+        pubsub = redis_client.pubsub()
+        channel_name = f"project_{project_id}_progress"
+        pubsub.subscribe(channel_name)
+        
+        # We need to listen to Redis messages in a non-blocking way
+        while True:
+            # get_message() is synchronous, but we can put it in a loop with asyncio.sleep
+            message = pubsub.get_message(ignore_subscribe_messages=True)
+            if message:
+                data = json.loads(message["data"])
+                await websocket.send_json(data)
+                
+                # If finished or error, we could optionally disconnect, but let's stay open
+                # so the frontend can handle the closure
+            
+            # Prevent blocking the async event loop
+            await asyncio.sleep(0.5)
+            
+    except WebSocketDisconnect:
+        print(f"WebSocket disconnected for project {project_id}")
+    except Exception as e:
+        print(f"WebSocket error: {e}")
+    finally:
+        if 'pubsub' in locals():
+            pubsub.unsubscribe(channel_name)
+            pubsub.close()
+        if 'redis_client' in locals():
+            redis_client.close()
 
 
 # ─── Video Processing ─────────────────────────────────────────────────────────
@@ -281,32 +287,94 @@ async def generate_audio(
         return JSONResponse(content={"status": "error", "message": str(e)}, status_code=500)
 
 
+from backend.services import voice_cloning_service
+
+@router.post("/clone-voice")
+async def clone_voice_endpoint(
+    text: str = Form(...),
+    video_file: UploadFile = File(...),
+    language: str = Form("en")
+):
+    try:
+        # Save video temporarily to extract audio
+        video_filename = f"temp_video_{uuid.uuid4()}{os.path.splitext(video_file.filename)[1]}"
+        video_path = os.path.join(UPLOAD_DIR, video_filename)
+        with open(video_path, "wb") as buffer:
+            shutil.copyfileobj(video_file.file, buffer)
+            
+        # Extract speaker sample
+        speaker_wav_path = os.path.join(UPLOAD_DIR, f"speaker_{uuid.uuid4()}.wav")
+        voice_cloning_service.extract_speaker_sample(video_path, speaker_wav_path, duration=10)
+        
+        # Clone voice
+        output_filename = f"cloned_{uuid.uuid4()}.wav"
+        output_path = os.path.join(UPLOAD_DIR, output_filename)
+        
+        success = voice_cloning_service.clone_voice(text, speaker_wav_path, language, output_path)
+        
+        # Cleanup temp video and speaker sample
+        if os.path.exists(video_path):
+            os.remove(video_path)
+        if os.path.exists(speaker_wav_path):
+            os.remove(speaker_wav_path)
+            
+        if success:
+            return JSONResponse(content={"status": "success", "audio_url": f"/uploads/{output_filename}"})
+        return JSONResponse(content={"status": "error", "message": "Voice cloning failed"}, status_code=500)
+    except Exception as e:
+        return JSONResponse(content={"status": "error", "message": str(e)}, status_code=500)
+
 # ─── Project CRUD ─────────────────────────────────────────────────────────────
 
 @router.get("/project/{project_id}")
-async def get_project(project_id: int, db: Session = Depends(database.get_db)):
-    project = db.query(models.Project).filter(models.Project.id == project_id).first()
+async def get_project(
+    project_id: int, 
+    user: models.User = Depends(auth.get_current_user),
+    db: Session = Depends(database.get_db)
+):
+    project = db.query(models.Project).filter(
+        models.Project.id == project_id,
+        models.Project.user_id == user.id
+    ).first()
     if not project:
         return JSONResponse(status_code=404, content={"status": "error", "message": "Loyiha topilmadi"})
 
-    segments = []
+    # Extract segments logic
+    raw_segments = []
     if project.transcript:
-        raw = project.transcript.get('segments', []) if isinstance(project.transcript, dict) else project.transcript
+        if isinstance(project.transcript, dict) and 'segments' in project.transcript:
+            raw_segments = project.transcript['segments']
+        elif isinstance(project.transcript, list):
+            raw_segments = project.transcript
     elif project.translated_transcript:
-        raw = project.translated_transcript
-    else:
-        raw = []
+        raw_segments = project.translated_transcript
 
-    segments = [{"start": s['start'], "end": s['end'], "text": s['text'], "translated": s.get('translated_text') or s.get('translated')} for s in raw]
+    # Format segments for frontend
+    segments = []
+    for s in raw_segments:
+        segments.append({
+            "start": s.get('start', 0),
+            "end": s.get('end', 0),
+            "text": s.get('text', ''),
+            "translated": s.get('translated_text') or s.get('translated') or ''
+        })
 
     return JSONResponse(content={
         "status": "success",
         "data": {
-            "project_id": project.id,
-            "video_url": project.video_url,
-            "segments": segments,
+            "id": project.id,
+            "project_id": project.id, # legacy support
+            "title": project.title,
             "status": project.status,
-            "title": project.title
+            "progress": project.progress,
+            "thumbnail": project.thumbnail,
+            "video_url": project.video_url,
+            "final_video_url": project.final_video_url,
+            "dubbed_audio_url": project.dubbed_audio_url,
+            "quality": project.quality,
+            "created_at": str(project.created_at),
+            "segments": segments,
+            "error_message": project.error_message
         }
     })
 

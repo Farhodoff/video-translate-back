@@ -15,3 +15,8 @@ uploads/
 .env
 sql_app.db
 .idea/
+
+# AI Model Weights
+backend/third_party/**/*.pth
+backend/third_party/**/*.weights
+backend/third_party/**/checkpoints/
